@@ -35,8 +35,8 @@ create table if not exists xbt_files
 (
 	fid int not null auto_increment,
 	info_hash binary(20) not null,
-	leechers int not null default 0,
 	seeders int not null default 0,
+	leechers int not null default 0,
 	completed int not null default 0,
 	flags int not null default 0,
 	mtime int not null,
@@ -50,7 +50,6 @@ create table if not exists xbt_files_users
 	fid int not null,
 	uid int not null,
 	active tinyint not null,
-	announced int not null,
 	completed int not null,
 	downloaded bigint unsigned not null,
 	`left` bigint unsigned not null,

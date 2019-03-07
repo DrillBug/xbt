@@ -1,8 +1,8 @@
-cmake_minimum_required(VERSION 2.4)
+cmake_minimum_required(VERSION 3.7)
 project(xbt-tracker)
 set(CMAKE_BUILD_TYPE release)
 # set(CMAKE_CXX_COMPILER clang++)
-set(CMAKE_CXX_FLAGS -std=c++11)
+set(CMAKE_CXX_STANDARD 14)
 set(CPACK_GENERATOR DEB)
 set(CPACK_PACKAGE_CONTACT "Olaf van der Spek <olafvdspek@gmail.com>")
 set(CPACK_STRIP_FILES true)
@@ -13,7 +13,7 @@ if(HAVE_SYS_EPOLL)
 	add_definitions(-DEPOLL)
 endif()
 # set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pedantic -Wall -Wextra")
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wno-parentheses -Wno-sign-compare")
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wno-implicit-fallthrough -Wno-parentheses -Wno-sign-compare")
 add_executable(
 	xbt_tracker
 	../misc/bt_misc.cpp
@@ -25,10 +25,9 @@ add_executable(
 	config.cpp
 	connection.cpp
 	epoll.cpp
-	server.cpp
+	tracker.cpp
 	tracker_input.cpp
 	transaction.cpp
-	"XBT Tracker.cpp"
 )
 target_link_libraries(xbt_tracker mysqlclient z)
 install(TARGETS xbt_tracker DESTINATION bin)

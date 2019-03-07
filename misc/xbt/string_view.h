@@ -1,12 +1,13 @@
 #pragma once
 
-#include <boost/lexical_cast.hpp>
-#include <boost/utility/string_ref.hpp>
+#include <boost/convert.hpp>
+#include <boost/convert/strtol.hpp>
+#include <boost/utility/string_view.hpp>
 #include <string>
 
 namespace std 
 {
-	using string_view = boost::string_ref;
+	using string_view = boost::string_view;
 }
 
 inline std::string& operator+=(std::string& a, std::string_view b)
@@ -19,37 +20,26 @@ inline std::string& operator<<(std::string& a, std::string_view b)
 	return a += b;
 }
 
-inline std::string& operator<<(std::string& a, long long b)
+template<class T>
+inline std::enable_if_t<std::is_integral<T>::value, std::string&> operator<<(std::string& a, T b)
 {
 	return a += std::to_string(b);
 }
 
 inline float to_float(std::string_view v)
 {
-	// return boost::convert<float>(v, boost::cnv::strtol(), 0.0f);
-	if (v.empty())
-		return 0;
-	try
-	{
-		return boost::lexical_cast<float>(v);
-	}
-	catch (boost::bad_lexical_cast&)
-	{
-	}
-	return 0;
+	return boost::convert<float>(v, boost::cnv::strtol(), 0.0f);
 }
 
 inline long long to_int(std::string_view v)
 {
-	// return boost::convert<long long>(v, boost::cnv::strtol(), 0);
-	if (v.empty())
-		return 0;
-	try
-	{
-		return boost::lexical_cast<long long>(v);
-	}
-	catch (boost::bad_lexical_cast&)
-	{
-	}
-	return 0;
+	return boost::convert<long long>(v, boost::cnv::strtol(), 0);
+}
+
+inline std::string_view read_until(std::string_view& v, char sep, bool keep_sep = false)
+{
+	size_t i = v.find(sep);
+	std::string_view ret = v.substr(0, i);
+	v.remove_prefix(i == std::string_view::npos ? v.size() : keep_sep ? i : i + 1);
+	return ret;
 }
