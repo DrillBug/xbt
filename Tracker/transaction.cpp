@@ -71,35 +71,35 @@ void Ctransaction::send_announce(data_ref r)
 {
 	if (read_int(8, &r[uti_connection_id], r.end()) != connection_id())
 		return;
-	if (!srv_config().m_anonymous_announce)
+	if (!srv_config().anonymous_announce_)
 	{
 		send_error(r, "access denied");
 		return;
 	}
-	Ctracker_input ti;
-	ti.m_downloaded = read_int(8, &r[utia_downloaded], r.end());
-	ti.m_event = static_cast<Ctracker_input::t_event>(read_int(4, &r[utia_event], r.end()));
-	ti.m_info_hash.assign(reinterpret_cast<const char*>(&r[utia_info_hash]), 20);
-	ti.m_ipa = read_int(4, &r[utia_ipa], r.end()) && is_private_ipa(m_a.sin_addr.s_addr)
+	tracker_input_t ti;
+	ti.downloaded_ = read_int(8, &r[utia_downloaded], r.end());
+	ti.event_ = static_cast<tracker_input_t::event_t>(read_int(4, &r[utia_event], r.end()));
+	ti.info_hash_.assign(reinterpret_cast<const char*>(&r[utia_info_hash]), 20);
+	ti.ipa_ = read_int(4, &r[utia_ipa], r.end()) && is_private_ipa(m_a.sin_addr.s_addr)
 		? htonl(read_int(4, &r[utia_ipa], r.end()))
 		: m_a.sin_addr.s_addr;
-	ti.m_left = read_int(8, &r[utia_left], r.end());
-	memcpy(ti.m_peer_id.data(), &r[utia_peer_id], 20);
-	ti.m_port = htons(read_int(2, &r[utia_port], r.end()));
-	ti.m_uploaded = read_int(8, &r[utia_uploaded], r.end());
+	ti.left_ = read_int(8, &r[utia_left], r.end());
+	memcpy(ti.peer_id_.data(), &r[utia_peer_id], 20);
+	ti.port_ = htons(read_int(2, &r[utia_port], r.end()));
+	ti.uploaded_ = read_int(8, &r[utia_uploaded], r.end());
 	std::string error = srv_insert_peer(ti, true, NULL);
 	if (!error.empty())
 	{
 		send_error(r, error);
 		return;
 	}
-	auto torrent = find_torrent(ti.m_info_hash);
+	auto torrent = find_torrent(ti.info_hash_);
 	if (!torrent)
 		return;
 	char d[2 << 10];
 	write_int(4, d + uto_action, uta_announce);
 	write_int(4, d + uto_transaction_id, read_int(4, &r[uti_transaction_id], r.end()));
-	write_int(4, d + utoa_interval, srv_config().m_announce_interval);
+	write_int(4, d + utoa_interval, srv_config().announce_interval_);
 	write_int(4, d + utoa_leechers, torrent->leechers);
 	write_int(4, d + utoa_seeders, torrent->seeders);
 	mutable_str_ref peers(d + utoa_size, 300);
@@ -111,7 +111,7 @@ void Ctransaction::send_scrape(data_ref r)
 {
 	if (read_int(8, &r[uti_connection_id], r.end()) != connection_id())
 		return;
-	if (!srv_config().m_anonymous_scrape)
+	if (!srv_config().anonymous_scrape_)
 	{
 		send_error(r, "access denied");
 		return;
@@ -140,7 +140,7 @@ void Ctransaction::send_scrape(data_ref r)
 	send(data_ref(d, w));
 }
 
-void Ctransaction::send_error(data_ref r, const std::string& msg)
+void Ctransaction::send_error(data_ref r, std::string_view msg)
 {
 	char d[2 << 10];
 	write_int(4, d + uto_action, uta_error);

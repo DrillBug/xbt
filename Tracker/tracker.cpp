@@ -44,7 +44,7 @@ static time_t g_time = time(NULL);
 static time_t g_write_db_torrents_time;
 static time_t g_write_db_users_time;
 static unsigned long long g_secret;
-static int g_fid_end = 0;
+static int g_tid_end = 0;
 static bool g_read_users_can_leech;
 static bool g_read_users_peers_limit;
 static bool g_read_users_torrent_pass;
@@ -105,9 +105,9 @@ const config_t& srv_config()
 	return g_config;
 }
 
-const torrent_t* find_torrent(const string& id)
+const torrent_t* find_torrent(string_view info_hash)
 {
-	return find_ptr(g_torrents, to_array<char, 20>(id));
+	return find_ptr(g_torrents, to_array<char, 20>(info_hash));
 }
 
 user_t* find_user_by_uid(int v)
@@ -137,34 +137,34 @@ void read_config()
 		config_t config;
 		for (auto row : query("select name, value from @config where value is not null"))
 		{
-			if (config.set(row[0].s(), row[1].s()))
-				cerr << "unknown config name: " << row[0].s() << endl;
+			if (config.set(row[0], string_view(row[1])))
+				cerr << "unknown config name: " << row[0] << endl;
 		}
 		config.load(g_conf_file);
-		if (config.m_torrent_pass_private_key.empty())
+		if (config.torrent_pass_private_key_.empty())
 		{
-			config.m_torrent_pass_private_key = generate_random_string(27);
-			query("insert into @config (name, value) values ('torrent_pass_private_key', ?)", config.m_torrent_pass_private_key);
+			config.torrent_pass_private_key_ = generate_random_string(27);
+			query("insert into @config (name, value) values ('torrent_pass_private_key', ?)", config.torrent_pass_private_key_);
 		}
 		g_config = config;
-		g_database.set_name("completed", g_config.m_column_files_completed);
-		g_database.set_name("leechers", g_config.m_column_files_leechers);
-		g_database.set_name("seeders", g_config.m_column_files_seeders);
-		g_database.set_name("fid", g_config.m_column_files_fid);
-		g_database.set_name("uid", g_config.m_column_users_uid);
-		g_database.set_name("announce_log", g_config.m_table_announce_log.empty() ? g_table_prefix + "announce_log" : g_config.m_table_announce_log);
-		g_database.set_name("files", g_config.m_table_torrents.empty() ? g_table_prefix + "files" : g_config.m_table_torrents);
-		g_database.set_name("files_users", g_config.m_table_torrents_users.empty() ? g_table_prefix + "files_users" : g_config.m_table_torrents_users);
-		g_database.set_name("scrape_log", g_config.m_table_scrape_log.empty() ? g_table_prefix + "scrape_log" : g_config.m_table_scrape_log);
-		g_database.set_name("users", g_config.m_table_users.empty() ? g_table_prefix + "users" : g_config.m_table_users);
+		g_database.set_name("completed", g_config.column_torrents_completed_);
+		g_database.set_name("leechers", g_config.column_torrents_leechers_);
+		g_database.set_name("seeders", g_config.column_torrents_seeders_);
+		g_database.set_name("tid", g_config.column_torrents_tid_);
+		g_database.set_name("uid", g_config.column_users_uid_);
+		g_database.set_name("announce_log", g_config.table_announce_log_.empty() ? g_table_prefix + "announce_log" : g_config.table_announce_log_);
+		g_database.set_name("scrape_log", g_config.table_scrape_log_.empty() ? g_table_prefix + "scrape_log" : g_config.table_scrape_log_);
+		g_database.set_name("torrents", g_config.table_torrents_.empty() ? g_table_prefix + "torrents" : g_config.table_torrents_);
+		g_database.set_name("torrents_users", g_config.table_torrents_users_.empty() ? g_table_prefix + "peers" : g_config.table_torrents_users_);
+		g_database.set_name("users", g_config.table_users_.empty() ? g_table_prefix + "users" : g_config.table_users_);
 	}
 	catch (bad_query&)
 	{
 	}
-	if (g_config.m_listen_ipas.empty())
-		g_config.m_listen_ipas.insert(htonl(INADDR_ANY));
-	if (g_config.m_listen_ports.empty())
-		g_config.m_listen_ports.insert(2710);
+	if (g_config.listen_ipas_.empty())
+		g_config.listen_ipas_.insert(htonl(INADDR_ANY));
+	if (g_config.listen_ports_.empty())
+		g_config.listen_ports_.insert(2710);
 	g_read_config_time = srv_time();
 }
 
@@ -173,28 +173,28 @@ void read_db_torrents()
 	g_read_db_torrents_time = srv_time();
 	try
 	{
-		if (!g_config.m_auto_register)
+		if (!g_config.auto_register_)
 		{
-			for (auto row : query(g_database, "select info_hash, @fid from @files where flags & 1"))
+			for (auto row : query(g_database, "select info_hash, @tid from @torrents where flags & 1"))
 			{
 				g_torrents.erase(to_array<char, 20>(row[0]));
-				query("delete from @files where @fid = ?", row[1]);
+				query("delete from @torrents where @tid = ?", row[1]);
 			}
 		}
-		if (g_config.m_auto_register && !g_torrents.empty())
+		if (g_config.auto_register_ && !g_torrents.empty())
 			return;
-		for (auto row : query("select info_hash, @completed, @fid, ctime from @files where @fid >= ?", g_fid_end))
+		for (auto row : query("select info_hash, @completed, @tid, ctime from @torrents where @tid >= ?", g_tid_end))
 		{
-			g_fid_end = max<int>(g_fid_end, row[2].i() + 1);
-			if (row[0].size() != 20 || find_torrent(row[0].s()))
+			g_tid_end = max<int>(g_tid_end, row[2].i() + 1);
+			if (row[0].size() != 20 || find_torrent(row[0]))
 				continue;
-			torrent_t& file = g_torrents[to_array<char, 20>(row[0])];
-			if (file.fid)
+			torrent_t& t = g_torrents[to_array<char, 20>(row[0])];
+			if (t.tid)
 				continue;
-			file.completed = row[1].i();
-			file.dirty = false;
-			file.fid = row[2].i();
-			file.ctime = row[3].i();
+			t.completed = row[1].i();
+			t.dirty = false;
+			t.tid = row[2].i();
+			t.ctime = row[3].i();
 		}
 	}
 	catch (bad_query&)
@@ -271,23 +271,23 @@ void write_db_torrents()
 		{
 			for (auto& i : g_torrents)
 			{
-				torrent_t& file = i.second;
-				if (!file.dirty)
+				torrent_t& t = i.second;
+				if (!t.dirty)
 					continue;
-				if (!file.fid)
+				if (!t.tid)
 				{
-					query("insert into @files (info_hash, mtime, ctime) values (?, unix_timestamp(), unix_timestamp())", i.first);
-					file.fid = g_database.insert_id();
+					query("insert into @torrents (info_hash, mtime, ctime) values (?, unix_timestamp(), unix_timestamp())", i.first);
+					t.tid = g_database.insert_id();
 				}
-				buffer += make_query(g_database, "(?,?,?,?),", file.leechers, file.seeders, file.completed, file.fid);
-				file.dirty = false;
+				buffer += make_query(g_database, "(?,?,?,?),", t.leechers, t.seeders, t.completed, t.tid);
+				t.dirty = false;
 				if (buffer.size() > 255 << 10)
 					break;
 			}
 			if (buffer.empty())
 				break;
 			buffer.pop_back();
-			async_query("insert into @files (@leechers, @seeders, @completed, @fid) values ?"
+			async_query("insert into @torrents (@leechers, @seeders, @completed, @tid) values ?"
 				" on duplicate key update"
 				"  @leechers = values(@leechers),"
 				"  @seeders = values(@seeders),"
@@ -319,7 +319,7 @@ void write_db_users()
 	if (!g_torrents_users_updates_buffer.empty())
 	{
 		g_torrents_users_updates_buffer.pop_back();
-		async_query("insert into @files_users (active, completed, downloaded, `left`, uploaded, mtime, fid, uid) values ?"
+		async_query("insert into @torrents_users (active, completed, downloaded, `left`, uploaded, mtime, tid, uid) values ?"
 			" on duplicate key update"
 			"  active = values(active),"
 			"  completed = completed + values(completed),"
@@ -329,7 +329,7 @@ void write_db_users()
 			"  mtime = values(mtime)", raw(g_torrents_users_updates_buffer));
 		g_torrents_users_updates_buffer.erase();
 	}
-	async_query("update @files_users set active = 0 where mtime < unix_timestamp() - 60 * 60");
+	async_query("update @torrents_users set active = 0 where mtime < unix_timestamp() - 60 * 60");
 	if (!g_users_updates_buffer.empty())
 	{
 		g_users_updates_buffer.pop_back();
@@ -346,16 +346,16 @@ int test_sql()
 	try
 	{
 		mysql_get_server_version(g_database);
-		if (g_config.m_log_announce)
+		if (g_config.log_announce_)
 			query("select id, ipa, port, event, info_hash, peer_id, downloaded, left0, uploaded, uid, mtime from @announce_log where 0");
 		query("select name, value from @config where 0");
-		query("select @fid, info_hash, @leechers, @seeders, flags, mtime, ctime from @files where 0");
-		query("select fid, uid, active, completed, downloaded, `left`, uploaded from @files_users where 0");
-		if (g_config.m_log_scrape)
+		query("select @tid, info_hash, @leechers, @seeders, flags, mtime, ctime from @torrents where 0");
+		query("select tid, uid, active, completed, downloaded, `left`, uploaded from @torrents_users where 0");
+		if (g_config.log_scrape_)
 			query("select id, ipa, uid, mtime from @scrape_log where 0");
 		query("select @uid, torrent_pass_version, downloaded, uploaded from @users where 0");
-		query("update @files set @leechers = 0, @seeders = 0");
-		// query("update @files_users set active = 0");
+		query("update @torrents set @leechers = 0, @seeders = 0");
+		// query("update @torrents_users set active = 0");
 		g_read_users_can_leech = query("show columns from @users like 'can_leech'").size();
 		g_read_users_peers_limit = query("show columns from @users like 'peers_limit'").size();
 		g_read_users_torrent_pass = query("show columns from @users like 'torrent_pass'").size();
@@ -386,7 +386,7 @@ void clean_up(torrent_t& t, time_t time)
 void clean_up()
 {
 	for (auto& i : g_torrents)
-		clean_up(i.second, srv_time() - static_cast<int>(1.5 * g_config.m_announce_interval));
+		clean_up(i.second, srv_time() - static_cast<int>(1.5 * g_config.announce_interval_));
 	g_clean_up_time = srv_time();
 }
 
@@ -406,9 +406,9 @@ int srv_run()
 	}
 	list<tcp_listen_socket_t> lt;
 	list<udp_listen_socket_t> lu;
-	for (auto& j : g_config.m_listen_ipas)
+	for (auto& j : g_config.listen_ipas_)
 	{
-		for (auto& i : g_config.m_listen_ports)
+		for (auto& i : g_config.listen_ports_)
 		{
 			Csocket l;
 			if (l.open(SOCK_STREAM) == INVALID_SOCKET)
@@ -436,7 +436,7 @@ int srv_run()
 			}
 			return 1;
 		}
-		for (auto& i : g_config.m_listen_ports)
+		for (auto& i : g_config.listen_ports_)
 		{
 			Csocket l;
 			if (l.open(SOCK_DGRAM) == INVALID_SOCKET)
@@ -462,11 +462,11 @@ int srv_run()
 	// test_announce();
 #endif
 #ifndef WIN32
-	if (g_config.m_daemon)
+	if (g_config.daemon_)
 	{
 		if (daemon(true, false))
 			cerr << "daemon failed\n";
-		ofstream(g_config.m_pid_file.c_str()) << getpid() << endl;
+		ofstream(g_config.pid_file_.c_str()) << getpid() << endl;
 		struct sigaction act;
 		act.sa_handler = sig_handler;
 		sigemptyset(&act.sa_mask);
@@ -554,22 +554,22 @@ int srv_run()
 			}
 		}
 #endif
-		if (srv_time() - g_read_config_time > g_config.m_read_config_interval)
+		if (srv_time() - g_read_config_time > g_config.read_config_interval_)
 			read_config();
-		else if (srv_time() - g_clean_up_time > g_config.m_clean_up_interval)
+		else if (srv_time() - g_clean_up_time > g_config.clean_up_interval_)
 			clean_up();
-		else if (srv_time() - g_read_db_torrents_time > g_config.m_read_db_interval)
+		else if (srv_time() - g_read_db_torrents_time > g_config.read_db_interval_)
 			read_db_torrents();
-		else if (srv_time() - g_read_db_users_time > g_config.m_read_db_interval)
+		else if (srv_time() - g_read_db_users_time > g_config.read_db_interval_)
 			read_db_users();
-		else if (g_config.m_write_db_interval && srv_time() - g_write_db_torrents_time > g_config.m_write_db_interval)
+		else if (g_config.write_db_interval_ && srv_time() - g_write_db_torrents_time > g_config.write_db_interval_)
 			write_db_torrents();
-		else if (g_config.m_write_db_interval && srv_time() - g_write_db_users_time > g_config.m_write_db_interval)
+		else if (g_config.write_db_interval_ && srv_time() - g_write_db_users_time > g_config.write_db_interval_)
 			write_db_users();
 	}
 	write_db_torrents();
 	write_db_users();
-	unlink(g_config.m_pid_file.c_str());
+	unlink(g_config.pid_file_.c_str());
 	return 0;
 }
 
@@ -612,106 +612,106 @@ void accept(const Csocket& l)
 	}
 }
 
-string srv_insert_peer(const Ctracker_input& v, bool udp, user_t* user)
+string srv_insert_peer(const tracker_input_t& v, bool udp, user_t* user)
 {
-	if (g_config.m_log_announce)
+	if (g_config.log_announce_)
 	{
 		g_announce_log_buffer += make_query(g_database, "(?,?,?,?,?,?,?,?,?,?),",
-			ntohl(v.m_ipa),
-			ntohs(v.m_port),
-			int(v.m_event),
-			v.m_info_hash,
-			v.m_peer_id,
-			v.m_downloaded,
-			v.m_left,
-			v.m_uploaded,
+			ntohl(v.ipa_),
+			ntohs(v.port_),
+			int(v.event_),
+			v.info_hash_,
+			v.peer_id_,
+			v.downloaded_,
+			v.left_,
+			v.uploaded_,
 			user ? user->uid : 0,
 			srv_time());
 	}
-	if (!g_config.m_offline_message.empty())
-		return g_config.m_offline_message;
+	if (!g_config.offline_message_.empty())
+		return g_config.offline_message_;
 	if (0)
 		return bts_banned_client;
-	if (!g_config.m_anonymous_announce && !user)
+	if (!g_config.anonymous_announce_ && !user)
 		return bts_unregistered_torrent_pass;
-	if (!g_config.m_auto_register && !find_torrent(v.m_info_hash))
+	if (!g_config.auto_register_ && !find_torrent(v.info_hash_))
 		return bts_unregistered_torrent;
-	if (v.m_left && user && !user->can_leech)
+	if (v.left_ && user && !user->can_leech)
 		return bts_can_not_leech;
-	torrent_t& file = g_torrents[to_array<char, 20>(v.m_info_hash)];
-	if (!file.ctime)
-		file.ctime = srv_time();
-	if (v.m_left && user && user->wait_time && file.ctime + user->wait_time > srv_time())
+	torrent_t& t = g_torrents[to_array<char, 20>(v.info_hash_)];
+	if (!t.ctime)
+		t.ctime = srv_time();
+	if (v.left_ && user && user->wait_time && t.ctime + user->wait_time > srv_time())
 		return bts_wait_time;
-	peer_key_t peer_key(v.m_ipa, user ? user->uid : 0);
-	peer_t* i = find_ptr(file.peers, peer_key);
-	if (i)
-		(i->left ? file.leechers : file.seeders)--;
-	else if (v.m_left && user && user->peers_limit)
+	peer_key_t peer_key(v.ipa_, user ? user->uid : 0);
+	peer_t* p = find_ptr(t.peers, peer_key);
+	if (p)
+		(p->left ? t.leechers : t.seeders)--;
+	else if (v.left_ && user && user->peers_limit)
 	{
 		int c = 0;
-		for (auto& j : file.peers)
+		for (auto& j : t.peers)
 			c += j.second.left && j.second.uid == user->uid;
 		if (c >= user->peers_limit)
 			return bts_peers_limit_reached;
 	}
-	if (user && file.fid)
+	if (user && t.tid)
 	{
 		long long downloaded = 0;
 		long long uploaded = 0;
-		if (i
-			&& i->uid == user->uid
-			&& boost::equals(i->peer_id, v.m_peer_id)
-			&& v.m_downloaded >= i->downloaded
-			&& v.m_uploaded >= i->uploaded)
+		if (p
+			&& p->uid == user->uid
+			&& boost::equals(p->peer_id, v.peer_id_)
+			&& v.downloaded_ >= p->downloaded
+			&& v.uploaded_ >= p->uploaded)
 		{
-			downloaded = v.m_downloaded - i->downloaded;
-			uploaded = v.m_uploaded - i->uploaded;
+			downloaded = v.downloaded_ - p->downloaded;
+			uploaded = v.uploaded_ - p->uploaded;
 		}
 		g_torrents_users_updates_buffer += make_query(g_database, "(?,?,?,?,?,?,?,?),",
-			v.m_event != Ctracker_input::e_stopped,
-			v.m_event == Ctracker_input::e_completed,
+			v.event_ != tracker_input_t::e_stopped,
+			v.event_ == tracker_input_t::e_completed,
 			downloaded,
-			v.m_left,
+			v.left_,
 			uploaded,
 			srv_time(),
-			file.fid,
+			t.tid,
 			user->uid);
 		if (downloaded || uploaded)
 			g_users_updates_buffer += make_query(g_database, "(?,?,?),", downloaded, uploaded, user->uid);
 		if (g_torrents_users_updates_buffer.size() > 255 << 10)
 			write_db_users();
 	}
-	if (v.m_event == Ctracker_input::e_stopped)
-		file.peers.erase(peer_key);
+	if (v.event_ == tracker_input_t::e_stopped)
+		t.peers.erase(peer_key);
 	else
 	{
-		peer_t& peer = i ? *i : file.peers[peer_key];
-		peer.downloaded = v.m_downloaded;
-		peer.left = v.m_left;
-		peer.peer_id = v.m_peer_id;
-		peer.port = v.m_port;
+		peer_t& peer = p ? *p : t.peers[peer_key];
+		peer.downloaded = v.downloaded_;
+		peer.left = v.left_;
+		peer.peer_id = v.peer_id_;
+		peer.port = v.port_;
 		peer.uid = user ? user->uid : 0;
-		peer.uploaded = v.m_uploaded;
-		(peer.left ? file.leechers : file.seeders)++;
+		peer.uploaded = v.uploaded_;
+		(peer.left ? t.leechers : t.seeders)++;
 		peer.mtime = srv_time();
 	}
-	if (v.m_event == Ctracker_input::e_completed)
-		file.completed++;
+	if (v.event_ == tracker_input_t::e_completed)
+		t.completed++;
 	(udp ? g_stats.announced_udp : g_stats.announced_http)++;
-	file.dirty = true;
+	t.dirty = true;
 	return string();
 }
 
-void torrent_t::select_peers(mutable_str_ref& d, const Ctracker_input& ti) const
+void torrent_t::select_peers(mutable_str_ref& d, const tracker_input_t& ti) const
 {
-	if (ti.m_event == Ctracker_input::e_stopped)
+	if (ti.event_ == tracker_input_t::e_stopped)
 		return;
 	vector<array<char, 6>> candidates;
 	candidates.reserve(peers.size());
 	for (auto& i : peers)
 	{
-		if (!ti.m_left && !i.second.left)
+		if (!ti.left_ && !i.second.left)
 			continue;
 		array<char, 6> v;
 		memcpy(&v[0], &i.first.host_, 4);
@@ -735,28 +735,28 @@ void torrent_t::select_peers(mutable_str_ref& d, const Ctracker_input& ti) const
 	}
 }
 
-string srv_select_peers(const Ctracker_input& ti)
+string srv_select_peers(const tracker_input_t& ti)
 {
-	const torrent_t* f = find_torrent(ti.m_info_hash);
-	if (!f)
+	const torrent_t* t = find_torrent(ti.info_hash_);
+	if (!t)
 		return string();
 	array<char, 300> peers0;
 	mutable_str_ref peers = peers0;
-	f->select_peers(peers, ti);
+	t->select_peers(peers, ti);
 	peers.assign(peers0.data(), peers.data());
 	return (boost::format("d8:completei%de10:incompletei%de8:intervali%de12:min intervali%de5:peers%d:%se")
-		% f->seeders % f->leechers % g_config.m_announce_interval % g_config.m_announce_interval % peers.size() % peers).str();
+		% t->seeders % t->leechers % g_config.announce_interval_ % g_config.announce_interval_ % peers.size() % peers).str();
 }
 
-string srv_scrape(const Ctracker_input& ti, user_t* user)
+string srv_scrape(const tracker_input_t& ti, user_t* user)
 {
-	if (g_config.m_log_scrape)
-		g_scrape_log_buffer += make_query(g_database, "(?,?,?),", ntohl(ti.m_ipa), user ? user->uid : 0, srv_time());
-	if (!g_config.m_anonymous_scrape && !user)
+	if (g_config.log_scrape_)
+		g_scrape_log_buffer += make_query(g_database, "(?,?,?),", ntohl(ti.ipa_), user ? user->uid : 0, srv_time());
+	if (!g_config.anonymous_scrape_ && !user)
 		return "d14:failure reason25:unregistered torrent passe";
 	string d;
 	d += "d5:filesd";
-	if (ti.m_info_hashes.empty())
+	if (ti.info_hashes_.empty())
 	{
 		g_stats.scraped_full++;
 		d.reserve(90 * g_torrents.size());
@@ -769,17 +769,17 @@ string srv_scrape(const Ctracker_input& ti, user_t* user)
 	else
 	{
 		g_stats.scraped_http++;
-		if (ti.m_info_hashes.size() > 1)
+		if (ti.info_hashes_.size() > 1)
 			g_stats.scraped_multi++;
-		for (auto& j : ti.m_info_hashes)
+		for (auto& j : ti.info_hashes_)
 		{
 			if (const torrent_t* i = find_torrent(j))
 				d += (boost::format("20:%sd8:completei%de10:downloadedi%de10:incompletei%dee") % j % i->seeders % i->completed % i->leechers).str();
 		}
 	}
 	d += "e";
-	if (g_config.m_scrape_interval)
-		d += (boost::format("5:flagsd20:min_request_intervali%dee") % g_config.m_scrape_interval).str();
+	if (g_config.scrape_interval_)
+		d += (boost::format("5:flagsd20:min_request_intervali%dee") % g_config.scrape_interval_).str();
 	d += "e";
 	return d;
 }
@@ -797,25 +797,25 @@ void debug(const torrent_t& t, string& os)
 	}
 }
 
-string srv_debug(const Ctracker_input& ti)
+string srv_debug(const tracker_input_t& ti)
 {
 	string os;
 	os << "<!DOCTYPE HTML><meta http-equiv=refresh content=60><title>XBT Tracker</title>";
 	os << "<table>";
-	if (ti.m_info_hash.empty())
+	if (ti.info_hash_.empty())
 	{
 		for (auto& i : g_torrents)
 		{
 			if (!i.second.leechers && !i.second.seeders)
 				continue;
-			os << "<tr><td class=ar>" << i.second.fid
+			os << "<tr><td class=ar>" << i.second.tid
 				<< "<td><a href=\"?info_hash=" << uri_encode(i.first) << "\">" << hex_encode(i.first) << "</a>"
 				<< "<td>" << (i.second.dirty ? '*' : ' ')
 				<< "<td class=ar>" << i.second.leechers
 				<< "<td class=ar>" << i.second.seeders;
 		}
 	}
-	else if (const torrent_t* i = find_torrent(ti.m_info_hash))
+	else if (const torrent_t* i = find_torrent(ti.info_hash_))
 		debug(*i, os);
 	os << "</table>";
 	return os;
@@ -870,27 +870,27 @@ string srv_statistics()
 	os << "<tr><td>"
 		<< "<tr><td>up time<td class=ar>" << duration2a(up_time)
 		<< "<tr><td>"
-		<< "<tr><td>anonymous announce<td class=ar>" << g_config.m_anonymous_announce
-		<< "<tr><td>anonymous scrape<td class=ar>" << g_config.m_anonymous_scrape
-		<< "<tr><td>auto register<td class=ar>" << g_config.m_auto_register
-		<< "<tr><td>full scrape<td class=ar>" << g_config.m_full_scrape
-		<< "<tr><td>read config time<td class=ar>" << t - g_read_config_time << " / " << g_config.m_read_config_interval
-		<< "<tr><td>clean up time<td class=ar>" << t - g_clean_up_time << " / " << g_config.m_clean_up_interval
-		<< "<tr><td>read db files time<td class=ar>" << t - g_read_db_torrents_time << " / " << g_config.m_read_db_interval
-		<< "<tr><td>read db users time<td class=ar>" << t - g_read_db_users_time << " / " << g_config.m_read_db_interval
-		<< "<tr><td>write db files time<td class=ar>" << t - g_write_db_torrents_time << " / " << g_config.m_write_db_interval
-		<< "<tr><td>write db users time<td class=ar>" << t - g_write_db_users_time << " / " << g_config.m_write_db_interval;
+		<< "<tr><td>anonymous announce<td class=ar>" << g_config.anonymous_announce_
+		<< "<tr><td>anonymous scrape<td class=ar>" << g_config.anonymous_scrape_
+		<< "<tr><td>auto register<td class=ar>" << g_config.auto_register_
+		<< "<tr><td>full scrape<td class=ar>" << g_config.full_scrape_
+		<< "<tr><td>read config time<td class=ar>" << t - g_read_config_time << " / " << g_config.read_config_interval_
+		<< "<tr><td>clean up time<td class=ar>" << t - g_clean_up_time << " / " << g_config.clean_up_interval_
+		<< "<tr><td>read db files time<td class=ar>" << t - g_read_db_torrents_time << " / " << g_config.read_db_interval_
+		<< "<tr><td>read db users time<td class=ar>" << t - g_read_db_users_time << " / " << g_config.read_db_interval_
+		<< "<tr><td>write db files time<td class=ar>" << t - g_write_db_torrents_time << " / " << g_config.write_db_interval_
+		<< "<tr><td>write db users time<td class=ar>" << t - g_write_db_users_time << " / " << g_config.write_db_interval_;
 	os << "</table>";
 	return os;
 }
 
-user_t* find_user_by_torrent_pass(str_ref v, str_ref info_hash)
+user_t* find_user_by_torrent_pass(std::string_view v, std::string_view info_hash)
 {
 	if (v.size() != 32)
 		return NULL;
 	if (user_t* user = find_user_by_uid(read_int(4, hex_decode(v.substr(0, 8)))))
 	{
-		if (Csha1((boost::format("%s %d %d %s") % g_config.m_torrent_pass_private_key % user->torrent_pass_version % user->uid % info_hash).str()).read().substr(0, 12) == hex_decode(v.substr(8, 24)))
+		if (Csha1((boost::format("%s %d %d %s") % g_config.torrent_pass_private_key_ % user->torrent_pass_version % user->uid % info_hash).str()).read().substr(0, 12) == hex_decode(v.substr(8, 24)))
 			return user;
 	}
 	return find_ptr2(g_users_torrent_passes, to_array<char, 32>(v));
@@ -904,17 +904,17 @@ void srv_term()
 void test_announce()
 {
 	user_t* u = find_ptr(g_users, 1);
-	Ctracker_input i;
-	i.m_info_hash = "IHIHIHIHIHIHIHIHIHIH";
-	memcpy(i.m_peer_id.data(), str_ref("PIPIPIPIPIPIPIPIPIPI"));
-	i.m_ipa = htonl(0x7f000063);
-	i.m_port = 54321;
+	tracker_input_t i;
+	i.info_hash_ = "IHIHIHIHIHIHIHIHIHIH";
+	memcpy(i.peer_id_.data(), str_ref("PIPIPIPIPIPIPIPIPIPI"));
+	i.ipa_ = htonl(0x7f000063);
+	i.port_ = 54321;
 	cout << srv_insert_peer(i, false, u) << endl;
 	write_db_torrents();
 	write_db_users();
 	g_time++;
-	i.m_uploaded = 1 << 30;
-	i.m_downloaded = 1 << 20;
+	i.uploaded_ = 1 << 30;
+	i.downloaded_ = 1 << 20;
 	cout << srv_insert_peer(i, false, u) << endl;
 	write_db_torrents();
 	write_db_users();
@@ -947,19 +947,19 @@ int main1()
 #endif
 	try
 	{
-		g_database.open(config.m_mysql_host, config.m_mysql_user, config.m_mysql_password, config.m_mysql_database);
+		g_database.open(config.mysql_host_, config.mysql_user_, config.mysql_password_, config.mysql_database_);
 	}
 	catch (bad_query& e)
 	{
 		cerr << e.what() << endl;
 		return 1;
 	}
-	if (!config.m_query_log.empty())
+	if (!config.query_log_.empty())
 	{
-		static ofstream os(config.m_query_log.c_str());
+		static ofstream os(config.query_log_.c_str());
 		g_database.set_query_log(&os);
 	}
-	g_table_prefix = config.m_mysql_table_prefix;
+	g_table_prefix = config.mysql_table_prefix_;
 	return srv_run();
 }
 

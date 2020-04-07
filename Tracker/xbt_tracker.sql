@@ -1,7 +1,7 @@
 -- create table if not exists xbt_announce_log
 -- (
 	-- id int not null auto_increment,
-	-- ipa int unsigned not null,
+	-- ipv6 varbinary(16) not null,
 	-- port int not null,
 	-- event int not null,
 	-- info_hash binary(20) not null,
@@ -31,23 +31,9 @@ create table if not exists xbt_config
 	-- end int unsigned not null
 -- );
 
-create table if not exists xbt_files
+create table if not exists xbt_peers
 (
-	fid int not null auto_increment,
-	info_hash binary(20) not null,
-	seeders int not null default 0,
-	leechers int not null default 0,
-	completed int not null default 0,
-	flags int not null default 0,
-	mtime int not null,
-	ctime int not null,
-	primary key (fid),
-	unique key (info_hash)
-);
-
-create table if not exists xbt_files_users
-(
-	fid int not null,
+	tid int not null,
 	uid int not null,
 	active tinyint not null,
 	completed int not null,
@@ -55,18 +41,32 @@ create table if not exists xbt_files_users
 	`left` bigint unsigned not null,
 	uploaded bigint unsigned not null,
 	mtime int not null,
-	unique key (fid, uid),
+	primary key (tid, uid),
 	key (uid)
 );
 
 -- create table if not exists xbt_scrape_log
 -- (
 	-- id int not null auto_increment,
-	-- ipa int unsigned not null,
+	-- ipv6 varbinary(16) not null,
 	-- uid int not null,
 	-- mtime int not null,
 	-- primary key (id)
 -- ) engine = myisam;
+
+create table if not exists xbt_torrents
+(
+	tid int not null auto_increment,
+	info_hash binary(20) not null,
+	seeders int not null default 0,
+	leechers int not null default 0,
+	completed int not null default 0,
+	flags int not null default 0,
+	mtime int not null,
+	ctime int not null,
+	primary key (tid),
+	unique key (info_hash)
+);
 
 create table if not exists xbt_users
 (
@@ -84,5 +84,5 @@ create table if not exists xbt_users
 -- alter table xbt_files_users add down_rate int unsigned not null;
 -- alter table xbt_files_users add up_rate int unsigned not null;
 
--- alter table xbt_files_users add foreign key (fid) references xbt_files (fid) on delete cascade;
+-- alter table xbt_files_users add foreign key (fid) references xbt_torrents (tid) on delete cascade;
 -- alter table xbt_files_users add foreign key (uid) references xbt_users (uid) on delete cascade;
