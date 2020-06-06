@@ -31,36 +31,6 @@ public:
 	time_t start_time = time(NULL);
 };
 
-class peer_key_t
-{
-public:
-	peer_key_t(int host, int uid)
-	{
-		host_ = host;
-		uid_ = uid;
-	}
-
-	bool operator==(peer_key_t v) const
-	{
-		return host_ == v.host_ && uid_ == v.uid_;
-	}
-
-	bool operator<(peer_key_t v) const
-	{
-		return host_ < v.host_ || host_ == v.host_ && uid_ < v.uid_;
-	}
-
-	friend std::size_t hash_value(const peer_key_t& v)
-	{
-		std::size_t seed = boost::hash_value(v.host_);
-		boost::hash_combine(seed, v.uid_);
-		return seed;
-	}
-
-	int host_;
-	int uid_;
-};
-
 struct peer_t
 {
 	long long downloaded;
@@ -69,14 +39,16 @@ struct peer_t
 	int uid;
 	short port;
 	bool left;
-	std::array<char, 20> peer_id;
+	std::array<char, 4> ipv4 = {};
+	std::array<char, 16> ipv6 = {};
 };
 
 struct torrent_t
 {
 	void select_peers(mutable_str_ref& d, const tracker_input_t&) const;
+	void select_peers6(mutable_str_ref& d, const tracker_input_t&) const;
 
-	boost::unordered_map<peer_key_t, peer_t> peers;
+	boost::unordered_map<std::array<char, 20>, peer_t> peers;
 	time_t ctime;
 	int completed = 0;
 	int tid = 0;
@@ -107,4 +79,5 @@ std::string srv_debug(const tracker_input_t&);
 std::string srv_insert_peer(const tracker_input_t&, bool udp, user_t*);
 std::string srv_scrape(const tracker_input_t&, user_t*);
 std::string srv_select_peers(const tracker_input_t&);
+std::string srv_select_peers6(const tracker_input_t&);
 std::string srv_statistics();

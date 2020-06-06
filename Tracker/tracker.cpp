@@ -7,6 +7,10 @@
 #include "epoll.h"
 #include "transaction.h"
 
+#ifdef XBT_SYSTEMD
+#include <systemd/sd-daemon.h>
+#endif
+
 using namespace std;
 
 namespace std
@@ -99,6 +103,36 @@ public:
 			Ctransaction(m_s).recv();
 	}
 };
+
+static bool is_ipv4(std::array<char, 16> v)
+{
+	return v[0] == 0
+		&& v[1] == 0
+		&& v[2] == 0
+		&& v[3] == 0
+		&& v[4] == 0
+		&& v[5] == 0
+		&& v[6] == -1
+		&& v[7] == -1
+		&& v[8] == 0
+		&& v[9] == 0
+		&& v[10] == 0
+		&& v[11] == 0;
+}
+
+template <size_t N>
+static bool is_zero(std::array<char, N> v)
+{
+	return std::all_of(v.begin(), v.end(), [](char c)
+	{
+		return !c;
+	});
+}
+
+string to_sql(std::array<char, 16> v)
+{
+	return is_ipv4(v) ? string(&v[12], 4) : string(&v[0], 16);
+}
 
 const config_t& srv_config()
 {
@@ -302,13 +336,13 @@ void write_db_torrents()
 	if (!g_announce_log_buffer.empty())
 	{
 		g_announce_log_buffer.pop_back();
-		async_query("insert delayed into @announce_log (ipa, port, event, info_hash, peer_id, downloaded, left0, uploaded, uid, mtime) values ?", raw(g_announce_log_buffer));
+		async_query("insert delayed into @announce_log (ipv6, port, event, info_hash, peer_id, downloaded, left0, uploaded, uid, mtime) values ?", raw(g_announce_log_buffer));
 		g_announce_log_buffer.erase();
 	}
 	if (!g_scrape_log_buffer.empty())
 	{
 		g_scrape_log_buffer.pop_back();
-		async_query("insert delayed into @scrape_log (ipa, uid, mtime) values ", raw(g_scrape_log_buffer));
+		async_query("insert delayed into @scrape_log (ipv6, uid, mtime) values ", raw(g_scrape_log_buffer));
 		g_scrape_log_buffer.erase();
 	}
 }
@@ -347,14 +381,13 @@ int test_sql()
 	{
 		mysql_get_server_version(g_database);
 		if (g_config.log_announce_)
-			query("select id, ipa, port, event, info_hash, peer_id, downloaded, left0, uploaded, uid, mtime from @announce_log where 0");
+			query("select id, ipv6, port, event, info_hash, peer_id, downloaded, left0, uploaded, uid, mtime from @announce_log where 0");
 		query("select name, value from @config where 0");
 		query("select @tid, info_hash, @leechers, @seeders, flags, mtime, ctime from @torrents where 0");
 		query("select tid, uid, active, completed, downloaded, `left`, uploaded from @torrents_users where 0");
 		if (g_config.log_scrape_)
-			query("select id, ipa, uid, mtime from @scrape_log where 0");
+			query("select id, ipv6, uid, mtime from @scrape_log where 0");
 		query("select @uid, torrent_pass_version, downloaded, uploaded from @users where 0");
-		query("update @torrents set @leechers = 0, @seeders = 0");
 		// query("update @torrents_users set active = 0");
 		g_read_users_can_leech = query("show columns from @users like 'can_leech'").size();
 		g_read_users_peers_limit = query("show columns from @users like 'peers_limit'").size();
@@ -406,53 +439,74 @@ int srv_run()
 	}
 	list<tcp_listen_socket_t> lt;
 	list<udp_listen_socket_t> lu;
-	for (auto& j : g_config.listen_ipas_)
+#ifdef XBT_SYSTEMD
 	{
-		for (auto& i : g_config.listen_ports_)
+		int count = sd_listen_fds(true);
+		for (int i = 0; i < count; i++)
 		{
-			Csocket l;
-			if (l.open(SOCK_STREAM) == INVALID_SOCKET)
-				cerr << "socket failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-			else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true),
-				l.bind(j, htons(i)))
-				cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-			else if (l.listen())
-				cerr << "listen failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-			else
+			Csocket s(SD_LISTEN_FDS_START + i);
+			if (s.blocking(false))
 			{
-#ifdef SO_ACCEPTFILTER
-				accept_filter_arg afa;
-				bzero(&afa, sizeof(afa));
-				strcpy(afa.af_name, "httpready");
-				if (l.setsockopt(SOL_SOCKET, SO_ACCEPTFILTER, &afa, sizeof(afa)))
-					cerr << "setsockopt failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-#elif 0 // TCP_DEFER_ACCEPT
-				if (l.setsockopt(IPPROTO_TCP, TCP_DEFER_ACCEPT, 90))
-					cerr << "setsockopt failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-#endif
-				lt.push_back(tcp_listen_socket_t(l));
-				if (!g_epoll.ctl(EPOLL_CTL_ADD, l, EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLERR | EPOLLHUP, &lt.back()))
-					continue;
+				cerr << "ioctlsocket failed: " << Csocket::error2a(WSAGetLastError()) << '\n';
+				return 1;
 			}
-			return 1;
-		}
-		for (auto& i : g_config.listen_ports_)
-		{
-			Csocket l;
-			if (l.open(SOCK_DGRAM) == INVALID_SOCKET)
-				cerr << "socket failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-			else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true),
-				l.bind(j, htons(i)))
-				cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-			else
-			{
-				lu.push_back(udp_listen_socket_t(l));
-				if (!g_epoll.ctl(EPOLL_CTL_ADD, l, EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP, &lu.back()))
-					continue;
-			}
-			return 1;
+			lt.push_back(tcp_listen_socket_t(s));
+			if (g_epoll.ctl(EPOLL_CTL_ADD, s, EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLERR | EPOLLHUP, &lt.back()))
+				return 1;
 		}
 	}
+#endif
+	if (lt.empty())
+	{
+		for (auto& j : g_config.listen_ipas_)
+		{
+			for (auto& i : g_config.listen_ports_)
+			{
+				Csocket l;
+				if (l.open(SOCK_STREAM) == INVALID_SOCKET)
+					cerr << "socket failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+				else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true),
+					l.bind(j, htons(i)))
+					cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+				else if (l.listen())
+					cerr << "listen failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+				else
+				{
+#ifdef SO_ACCEPTFILTER
+					accept_filter_arg afa;
+					bzero(&afa, sizeof(afa));
+					strcpy(afa.af_name, "httpready");
+					if (l.setsockopt(SOL_SOCKET, SO_ACCEPTFILTER, &afa, sizeof(afa)))
+						cerr << "setsockopt failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+#elif 0 // TCP_DEFER_ACCEPT
+					if (l.setsockopt(IPPROTO_TCP, TCP_DEFER_ACCEPT, 90))
+						cerr << "setsockopt failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+#endif
+					lt.push_back(tcp_listen_socket_t(l));
+					if (!g_epoll.ctl(EPOLL_CTL_ADD, l, EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLERR | EPOLLHUP, &lt.back()))
+						continue;
+				}
+				return 1;
+			}
+			for (auto& i : g_config.listen_ports_)
+			{
+				Csocket l;
+				if (l.open(SOCK_DGRAM) == INVALID_SOCKET)
+					cerr << "socket failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+				else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true),
+					l.bind(j, htons(i)))
+					cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+				else
+				{
+					lu.push_back(udp_listen_socket_t(l));
+					if (!g_epoll.ctl(EPOLL_CTL_ADD, l, EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP, &lu.back()))
+						continue;
+				}
+				return 1;
+			}
+		}
+	}
+	query("update @torrents set @leechers = 0, @seeders = 0");
 	clean_up();
 	read_db_torrents();
 	read_db_users();
@@ -612,19 +666,19 @@ void accept(const Csocket& l)
 	}
 }
 
-string srv_insert_peer(const tracker_input_t& v, bool udp, user_t* user)
+string srv_insert_peer(const tracker_input_t& in, bool udp, user_t* user)
 {
 	if (g_config.log_announce_)
 	{
 		g_announce_log_buffer += make_query(g_database, "(?,?,?,?,?,?,?,?,?,?),",
-			ntohl(v.ipa_),
-			ntohs(v.port_),
-			int(v.event_),
-			v.info_hash_,
-			v.peer_id_,
-			v.downloaded_,
-			v.left_,
-			v.uploaded_,
+			to_sql(in.ipv6_),
+			ntohs(in.port_),
+			int(in.event_),
+			in.info_hash_,
+			in.peer_id_,
+			in.downloaded_,
+			in.left_,
+			in.uploaded_,
 			user ? user->uid : 0,
 			srv_time());
 	}
@@ -634,20 +688,19 @@ string srv_insert_peer(const tracker_input_t& v, bool udp, user_t* user)
 		return bts_banned_client;
 	if (!g_config.anonymous_announce_ && !user)
 		return bts_unregistered_torrent_pass;
-	if (!g_config.auto_register_ && !find_torrent(v.info_hash_))
+	if (!g_config.auto_register_ && !find_torrent(in.info_hash_))
 		return bts_unregistered_torrent;
-	if (v.left_ && user && !user->can_leech)
+	if (in.left_ && user && !user->can_leech)
 		return bts_can_not_leech;
-	torrent_t& t = g_torrents[to_array<char, 20>(v.info_hash_)];
+	torrent_t& t = g_torrents[to_array<char, 20>(in.info_hash_)];
 	if (!t.ctime)
 		t.ctime = srv_time();
-	if (v.left_ && user && user->wait_time && t.ctime + user->wait_time > srv_time())
+	if (in.left_ && user && user->wait_time && t.ctime + user->wait_time > srv_time())
 		return bts_wait_time;
-	peer_key_t peer_key(v.ipa_, user ? user->uid : 0);
-	peer_t* p = find_ptr(t.peers, peer_key);
+	peer_t* p = find_ptr(t.peers, in.peer_id_);
 	if (p)
 		(p->left ? t.leechers : t.seeders)--;
-	else if (v.left_ && user && user->peers_limit)
+	else if (in.left_ && user && user->peers_limit)
 	{
 		int c = 0;
 		for (auto& j : t.peers)
@@ -661,18 +714,17 @@ string srv_insert_peer(const tracker_input_t& v, bool udp, user_t* user)
 		long long uploaded = 0;
 		if (p
 			&& p->uid == user->uid
-			&& boost::equals(p->peer_id, v.peer_id_)
-			&& v.downloaded_ >= p->downloaded
-			&& v.uploaded_ >= p->uploaded)
+			&& in.downloaded_ >= p->downloaded
+			&& in.uploaded_ >= p->uploaded)
 		{
-			downloaded = v.downloaded_ - p->downloaded;
-			uploaded = v.uploaded_ - p->uploaded;
+			downloaded = in.downloaded_ - p->downloaded;
+			uploaded = in.uploaded_ - p->uploaded;
 		}
 		g_torrents_users_updates_buffer += make_query(g_database, "(?,?,?,?,?,?,?,?),",
-			v.event_ != tracker_input_t::e_stopped,
-			v.event_ == tracker_input_t::e_completed,
+			in.event_ != tracker_input_t::e_stopped,
+			in.event_ == tracker_input_t::e_completed,
 			downloaded,
-			v.left_,
+			in.left_,
 			uploaded,
 			srv_time(),
 			t.tid,
@@ -682,21 +734,24 @@ string srv_insert_peer(const tracker_input_t& v, bool udp, user_t* user)
 		if (g_torrents_users_updates_buffer.size() > 255 << 10)
 			write_db_users();
 	}
-	if (v.event_ == tracker_input_t::e_stopped)
-		t.peers.erase(peer_key);
+	if (in.event_ == tracker_input_t::e_stopped)
+		t.peers.erase(in.peer_id_);
 	else
 	{
-		peer_t& peer = p ? *p : t.peers[peer_key];
-		peer.downloaded = v.downloaded_;
-		peer.left = v.left_;
-		peer.peer_id = v.peer_id_;
-		peer.port = v.port_;
+		peer_t& peer = p ? *p : t.peers[in.peer_id_];
+		peer.downloaded = in.downloaded_;
+		peer.left = in.left_;
+		peer.port = in.port_;
 		peer.uid = user ? user->uid : 0;
-		peer.uploaded = v.uploaded_;
+		peer.uploaded = in.uploaded_;
 		(peer.left ? t.leechers : t.seeders)++;
 		peer.mtime = srv_time();
+		if (is_ipv4(in.ipv6_))
+			memcpy(peer.ipv4.data(), &in.ipv6_[12], 4);
+		else
+			peer.ipv6 = in.ipv6_;
 	}
-	if (v.event_ == tracker_input_t::e_completed)
+	if (in.event_ == tracker_input_t::e_completed)
 		t.completed++;
 	(udp ? g_stats.announced_udp : g_stats.announced_http)++;
 	t.dirty = true;
@@ -711,10 +766,12 @@ void torrent_t::select_peers(mutable_str_ref& d, const tracker_input_t& ti) cons
 	candidates.reserve(peers.size());
 	for (auto& i : peers)
 	{
-		if (!ti.left_ && !i.second.left)
+		if (ti.is_seeder() && !i.second.left)
+			continue;
+		if (is_zero(i.second.ipv4))
 			continue;
 		array<char, 6> v;
-		memcpy(&v[0], &i.first.host_, 4);
+		memcpy(&v[0], &i.second.ipv4, 4);
 		memcpy(&v[4], &i.second.port, 2);
 		candidates.push_back(v);
 	}
@@ -735,11 +792,47 @@ void torrent_t::select_peers(mutable_str_ref& d, const tracker_input_t& ti) cons
 	}
 }
 
+void torrent_t::select_peers6(mutable_str_ref& d, const tracker_input_t& ti) const
+{
+	if (ti.event_ == tracker_input_t::e_stopped)
+		return;
+	vector<array<char, 18>> candidates;
+	candidates.reserve(peers.size());
+	for (auto& i : peers)
+	{
+		if (ti.is_seeder() && !i.second.left)
+			continue;
+		if (is_zero(i.second.ipv6))
+			continue;
+		array<char, 18> v;
+		memcpy(&v[0], &i.second.ipv6, 16);
+		memcpy(&v[16], &i.second.port, 2);
+		candidates.push_back(v);
+	}
+	size_t c = d.size() / 18;
+	if (candidates.size() <= c)
+	{
+		memcpy(d.data(), candidates);
+		d.advance_begin(18 * candidates.size());
+		return;
+	}
+	while (c--)
+	{
+		int i = rand() % candidates.size();
+		memcpy(d.data(), candidates[i]);
+		d.advance_begin(18);
+		candidates[i] = candidates.back();
+		candidates.pop_back();
+	}
+}
+
 string srv_select_peers(const tracker_input_t& ti)
 {
 	const torrent_t* t = find_torrent(ti.info_hash_);
 	if (!t)
 		return string();
+	if (!is_ipv4(ti.ipv6_))
+		return srv_select_peers6(ti);
 	array<char, 300> peers0;
 	mutable_str_ref peers = peers0;
 	t->select_peers(peers, ti);
@@ -748,10 +841,23 @@ string srv_select_peers(const tracker_input_t& ti)
 		% t->seeders % t->leechers % g_config.announce_interval_ % g_config.announce_interval_ % peers.size() % peers).str();
 }
 
+string srv_select_peers6(const tracker_input_t& ti)
+{
+	const torrent_t* t = find_torrent(ti.info_hash_);
+	if (!t)
+		return string();
+	array<char, 900> peers0;
+	mutable_str_ref peers = peers0;
+	t->select_peers6(peers, ti);
+	peers.assign(peers0.data(), peers.data());
+	return (boost::format("d8:completei%de10:incompletei%de8:intervali%de12:min intervali%de5:peers6%d:%se")
+		% t->seeders % t->leechers % g_config.announce_interval_ % g_config.announce_interval_ % peers.size() % peers).str();
+}
+
 string srv_scrape(const tracker_input_t& ti, user_t* user)
 {
 	if (g_config.log_scrape_)
-		g_scrape_log_buffer += make_query(g_database, "(?,?,?),", ntohl(ti.ipa_), user ? user->uid : 0, srv_time());
+		g_scrape_log_buffer += make_query(g_database, "(?,?,?),", to_sql(ti.ipv6_), user ? user->uid : 0, srv_time());
 	if (!g_config.anonymous_scrape_ && !user)
 		return "d14:failure reason25:unregistered torrent passe";
 	string d;
@@ -786,14 +892,17 @@ string srv_scrape(const tracker_input_t& ti, user_t* user)
 
 void debug(const torrent_t& t, string& os)
 {
+	os << "<tr><th>IPv4<th>IPv6<th>Port<th>UID<th>Seeder<th>Modified<th>Peer ID";
 	for (auto& i : t.peers)
 	{
-		os << "<tr><td>" << Csocket::inet_ntoa(i.first.host_)
+		os << "<tr>"
+			<< "<td>" << Csocket::inet_ntoa(i.second.ipv4)
+			<< "<td>" << Csocket::inet_ntoa(i.second.ipv6)
 			<< "<td class=ar>" << ntohs(i.second.port)
 			<< "<td class=ar>" << i.second.uid
-			<< "<td class=ar>" << i.second.left
-			<< "<td class=ar>" << srv_time() - i.second.mtime
-			<< "<td>" << hex_encode(i.second.peer_id);
+			<< "<td class=ar>" << !i.second.left
+			<< "<td class=ar>" << duration2a(srv_time() - i.second.mtime) << " ago"
+			<< "<td>" << hex_encode(i.first);
 	}
 }
 
@@ -907,7 +1016,7 @@ void test_announce()
 	tracker_input_t i;
 	i.info_hash_ = "IHIHIHIHIHIHIHIHIHIH";
 	memcpy(i.peer_id_.data(), str_ref("PIPIPIPIPIPIPIPIPIPI"));
-	i.ipa_ = htonl(0x7f000063);
+	i.ipv6_ = {};
 	i.port_ = 54321;
 	cout << srv_insert_peer(i, false, u) << endl;
 	write_db_torrents();
@@ -1047,9 +1156,11 @@ int main(int argc, char* argv[])
 	{
 		if (!strcmp(argv[1], "--conf_file") && argc >= 3)
 			g_conf_file = argv[2];
+		else if (!strcmp(argv[1], "--conf-file") && argc >= 3)
+			g_conf_file = argv[2];
 		else
 		{
-			cerr << "  --conf_file arg (=xbt_tracker.conf)\n";
+			cerr << "  --conf-file arg (=xbt_tracker.conf)\n";
 			return 1;
 		}
 	}
