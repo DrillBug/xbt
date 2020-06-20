@@ -52,10 +52,12 @@ static int g_tid_end = 0;
 static bool g_read_users_can_leech;
 static bool g_read_users_peers_limit;
 static bool g_read_users_torrent_pass;
+static bool g_read_users_torrent_pass_version;
 static bool g_read_users_wait_time;
 static const char g_service_name[] = "XBT Tracker";
 
 void accept(const Csocket&);
+void test_announce();
 	
 template<class... A>
 static void async_query(const A&... a)
@@ -78,7 +80,7 @@ static void sig_handler(int v)
 class tcp_listen_socket_t : public client_t
 {
 public:
-	tcp_listen_socket_t(const Csocket& s)
+	explicit tcp_listen_socket_t(const Csocket& s)
 	{
 		m_s = s;
 	}
@@ -92,7 +94,7 @@ public:
 class udp_listen_socket_t : public client_t
 {
 public:
-	udp_listen_socket_t(const Csocket& s)
+	explicit udp_listen_socket_t(const Csocket& s)
 	{
 		m_s = s;
 	}
@@ -104,7 +106,7 @@ public:
 	}
 };
 
-static bool is_ipv4(std::array<char, 16> v)
+static bool is_ipv4(std::array<unsigned char, 16> v)
 {
 	return v[0] == 0
 		&& v[1] == 0
@@ -112,16 +114,16 @@ static bool is_ipv4(std::array<char, 16> v)
 		&& v[3] == 0
 		&& v[4] == 0
 		&& v[5] == 0
-		&& v[6] == -1
-		&& v[7] == -1
+		&& v[6] == 0
+		&& v[7] == 0
 		&& v[8] == 0
 		&& v[9] == 0
-		&& v[10] == 0
-		&& v[11] == 0;
+		&& v[10] == 0xff
+		&& v[11] == 0xff;
 }
 
 template <size_t N>
-static bool is_zero(std::array<char, N> v)
+static bool is_zero(std::array<unsigned char, N> v)
 {
 	return std::all_of(v.begin(), v.end(), [](char c)
 	{
@@ -129,9 +131,9 @@ static bool is_zero(std::array<char, N> v)
 	});
 }
 
-string to_sql(std::array<char, 16> v)
+string to_sql(std::array<unsigned char, 16> v)
 {
-	return is_ipv4(v) ? string(&v[12], 4) : string(&v[0], 16);
+	return string(is_ipv4(v) ? to_string_view(v).substr(12) : to_string_view(v));
 }
 
 const config_t& srv_config()
@@ -195,8 +197,6 @@ void read_config()
 	catch (bad_query&)
 	{
 	}
-	if (g_config.listen_ipas_.empty())
-		g_config.listen_ipas_.insert(htonl(INADDR_ANY));
 	if (g_config.listen_ports_.empty())
 		g_config.listen_ports_.insert(2710);
 	g_read_config_time = srv_time();
@@ -209,7 +209,7 @@ void read_db_torrents()
 	{
 		if (!g_config.auto_register_)
 		{
-			for (auto row : query(g_database, "select info_hash, @tid from @torrents where flags & 1"))
+			for (auto row : query(g_database, "select info_hash, @tid from @torrents where flags != 0 and flags & 1"))
 			{
 				g_torrents.erase(to_array<char, 20>(row[0]));
 				query("delete from @torrents where @tid = ?", row[1]);
@@ -248,7 +248,8 @@ void read_db_users()
 			q += ", peers_limit";
 		if (g_read_users_torrent_pass)
 			q += ", torrent_pass";
-		q += ", torrent_pass_version";
+		if (g_read_users_torrent_pass_version)
+			q += ", torrent_pass_version";
 		if (g_read_users_wait_time)
 			q += ", wait_time";
 		q += " from @users";
@@ -273,7 +274,8 @@ void read_db_users()
 					g_users_torrent_passes[to_array<char, 32>(row[c])] = &user;
 				c++;
 			}
-			user.torrent_pass_version = row[c++].i();
+			if (g_read_users_torrent_pass_version)
+				user.torrent_pass_version = row[c++].i();
 			if (g_read_users_wait_time)
 				user.wait_time = row[c++].i();
 		}
@@ -363,7 +365,7 @@ void write_db_users()
 			"  mtime = values(mtime)", raw(g_torrents_users_updates_buffer));
 		g_torrents_users_updates_buffer.erase();
 	}
-	async_query("update @torrents_users set active = 0 where mtime < unix_timestamp() - 60 * 60");
+	async_query("update @torrents_users set active = 0 where active = 1 and mtime < unix_timestamp() - 60 * 60");
 	if (!g_users_updates_buffer.empty())
 	{
 		g_users_updates_buffer.pop_back();
@@ -388,10 +390,10 @@ int test_sql()
 		if (g_config.log_scrape_)
 			query("select id, ipv6, uid, mtime from @scrape_log where 0");
 		query("select @uid, torrent_pass_version, downloaded, uploaded from @users where 0");
-		// query("update @torrents_users set active = 0");
 		g_read_users_can_leech = query("show columns from @users like 'can_leech'").size();
 		g_read_users_peers_limit = query("show columns from @users like 'peers_limit'").size();
 		g_read_users_torrent_pass = query("show columns from @users like 'torrent_pass'").size();
+		g_read_users_torrent_pass_version = query("show columns from @users like 'torrent_pass_version'").size();
 		g_read_users_wait_time = query("show columns from @users like 'wait_time'").size();
 		return 0;
 	}
@@ -450,7 +452,7 @@ int srv_run()
 				cerr << "ioctlsocket failed: " << Csocket::error2a(WSAGetLastError()) << '\n';
 				return 1;
 			}
-			lt.push_back(tcp_listen_socket_t(s));
+			lt.emplace_back(s);
 			if (g_epoll.ctl(EPOLL_CTL_ADD, s, EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLERR | EPOLLHUP, &lt.back()))
 				return 1;
 		}
@@ -458,52 +460,53 @@ int srv_run()
 #endif
 	if (lt.empty())
 	{
-		for (auto& j : g_config.listen_ipas_)
+		for (auto& i : g_config.listen_ports_)
 		{
-			for (auto& i : g_config.listen_ports_)
+			Csocket l;
+			if (l.open6(SOCK_STREAM) == INVALID_SOCKET)
+				cerr << "socket failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+			else if (l.setsockopt(IPPROTO_IPV6, IPV6_V6ONLY, false))
+				cerr << "setsockopt IPV6_V6ONLY failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+			else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true))
+				cerr << "setsockopt SO_REUSEADDR failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+			else if (l.bind6(i))
+				cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+			else if (l.listen())
+				cerr << "listen failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+			else
 			{
-				Csocket l;
-				if (l.open(SOCK_STREAM) == INVALID_SOCKET)
-					cerr << "socket failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-				else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true),
-					l.bind(j, htons(i)))
-					cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-				else if (l.listen())
-					cerr << "listen failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-				else
-				{
 #ifdef SO_ACCEPTFILTER
-					accept_filter_arg afa;
-					bzero(&afa, sizeof(afa));
-					strcpy(afa.af_name, "httpready");
-					if (l.setsockopt(SOL_SOCKET, SO_ACCEPTFILTER, &afa, sizeof(afa)))
-						cerr << "setsockopt failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+				accept_filter_arg afa;
+				bzero(&afa, sizeof(afa));
+				strcpy(afa.af_name, "httpready");
+				if (l.setsockopt(SOL_SOCKET, SO_ACCEPTFILTER, &afa, sizeof(afa)))
+					cerr << "setsockopt failed: " << Csocket::error2a(WSAGetLastError()) << endl;
 #elif 0 // TCP_DEFER_ACCEPT
-					if (l.setsockopt(IPPROTO_TCP, TCP_DEFER_ACCEPT, 90))
-						cerr << "setsockopt failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+				if (l.setsockopt(IPPROTO_TCP, TCP_DEFER_ACCEPT, 90))
+					cerr << "setsockopt failed: " << Csocket::error2a(WSAGetLastError()) << endl;
 #endif
-					lt.push_back(tcp_listen_socket_t(l));
-					if (!g_epoll.ctl(EPOLL_CTL_ADD, l, EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLERR | EPOLLHUP, &lt.back()))
-						continue;
-				}
-				return 1;
+				lt.emplace_back(l);
+				if (!g_epoll.ctl(EPOLL_CTL_ADD, l, EPOLLIN | EPOLLOUT | EPOLLPRI | EPOLLERR | EPOLLHUP, &lt.back()))
+					continue;
 			}
-			for (auto& i : g_config.listen_ports_)
+			return 1;
+		}
+		for (auto& i : g_config.listen_ports_)
+		{
+			Csocket l;
+			if (l.open6(SOCK_DGRAM) == INVALID_SOCKET)
+				cerr << "socket failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+			else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true))
+				cerr << "setsockopt SO_REUSEADDR failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+			else if (l.bind6(i))
+				cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << endl;
+			else
 			{
-				Csocket l;
-				if (l.open(SOCK_DGRAM) == INVALID_SOCKET)
-					cerr << "socket failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-				else if (l.setsockopt(SOL_SOCKET, SO_REUSEADDR, true),
-					l.bind(j, htons(i)))
-					cerr << "bind failed: " << Csocket::error2a(WSAGetLastError()) << endl;
-				else
-				{
-					lu.push_back(udp_listen_socket_t(l));
-					if (!g_epoll.ctl(EPOLL_CTL_ADD, l, EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP, &lu.back()))
-						continue;
-				}
-				return 1;
+				lu.emplace_back(l);
+				if (!g_epoll.ctl(EPOLL_CTL_ADD, l, EPOLLIN | EPOLLPRI | EPOLLERR | EPOLLHUP, &lu.back()))
+					continue;
 			}
+			return 1;
 		}
 	}
 	query("update @torrents set @leechers = 0, @seeders = 0");
@@ -568,7 +571,7 @@ int srv_run()
 		int n = 0;
 		for (auto& i : g_connections)
 		{
-			int z = i.pre_select(&fd_read_set, &fd_write_set);
+			int z = i.pre_select(fd_read_set, fd_write_set);
 			n = max(n, z);
 		}
 		for (auto& i : lt)
@@ -601,7 +604,7 @@ int srv_run()
 			}
 			for (auto i = g_connections.begin(); i != g_connections.end(); )
 			{
-				if (i->post_select(&fd_read_set, &fd_write_set))
+				if (i->post_select(fd_read_set, fd_write_set))
 					i = g_connections.erase(i);
 				else
 					i++;
@@ -629,10 +632,10 @@ int srv_run()
 
 void accept(const Csocket& l)
 {
-	sockaddr_in a;
+	sockaddr_in6 a;
 	for (int i = 0; i < 10000; i++)
 	{
-		socklen_t cb_a = sizeof(sockaddr_in);
+		socklen_t cb_a = sizeof(sockaddr_in6);
 #ifdef SOCK_NONBLOCK
 		Csocket s = accept4(l, reinterpret_cast<sockaddr*>(&a), &cb_a, SOCK_NONBLOCK);
 #else
@@ -837,8 +840,16 @@ string srv_select_peers(const tracker_input_t& ti)
 	mutable_str_ref peers = peers0;
 	t->select_peers(peers, ti);
 	peers.assign(peers0.data(), peers.data());
-	return (boost::format("d8:completei%de10:incompletei%de8:intervali%de12:min intervali%de5:peers%d:%se")
-		% t->seeders % t->leechers % g_config.announce_interval_ % g_config.announce_interval_ % peers.size() % peers).str();
+	string s;
+	s.reserve(1 << 10);
+	s << "d"
+		<< "8:completei" << t->seeders << "e"
+		<< "10:incompletei" << t->leechers << "e"
+		<< "8:intervali" << g_config.announce_interval_ << "e"
+		<< "12:min intervali" << g_config.announce_interval_ << "e"
+		<< "5:peers" << peers.size() << ":" << peers
+		<< "e";
+	return s;
 }
 
 string srv_select_peers6(const tracker_input_t& ti)
@@ -850,8 +861,16 @@ string srv_select_peers6(const tracker_input_t& ti)
 	mutable_str_ref peers = peers0;
 	t->select_peers6(peers, ti);
 	peers.assign(peers0.data(), peers.data());
-	return (boost::format("d8:completei%de10:incompletei%de8:intervali%de12:min intervali%de5:peers6%d:%se")
-		% t->seeders % t->leechers % g_config.announce_interval_ % g_config.announce_interval_ % peers.size() % peers).str();
+	string s;
+	s.reserve(2 << 10);
+	s << "d"
+		<< "8:completei" << t->seeders << "e"
+		<< "10:incompletei" << t->leechers << "e"
+		<< "8:intervali" << g_config.announce_interval_ << "e"
+		<< "12:min intervali" << g_config.announce_interval_ << "e"
+		<< "6:peers6" << peers.size() << ":" << peers
+		<< "e";
+	return s;
 }
 
 string srv_scrape(const tracker_input_t& ti, user_t* user)
@@ -869,7 +888,7 @@ string srv_scrape(const tracker_input_t& ti, user_t* user)
 		for (auto& i : g_torrents)
 		{
 			if (i.second.leechers || i.second.seeders)
-				d += (boost::format("20:%sd8:completei%de10:downloadedi%de10:incompletei%dee") % boost::make_iterator_range(i.first) % i.second.seeders % i.second.completed % i.second.leechers).str();
+				d << "20:" << to_string_view(i.first) << "d8:completei" << i.second.seeders << "e10:downloadedi" << i.second.completed << "e10:incompletei" << i.second.leechers << "ee";
 		}
 	}
 	else
@@ -877,15 +896,15 @@ string srv_scrape(const tracker_input_t& ti, user_t* user)
 		g_stats.scraped_http++;
 		if (ti.info_hashes_.size() > 1)
 			g_stats.scraped_multi++;
-		for (auto& j : ti.info_hashes_)
+		for (auto& i : ti.info_hashes_)
 		{
-			if (const torrent_t* i = find_torrent(j))
-				d += (boost::format("20:%sd8:completei%de10:downloadedi%de10:incompletei%dee") % j % i->seeders % i->completed % i->leechers).str();
+			if (const torrent_t* t = find_torrent(i))
+				d << "20:" << i << "d8:completei" << t->seeders << "e10:downloadedi" << t->completed << "e10:incompletei" << t->leechers << "ee";
 		}
 	}
 	d += "e";
 	if (g_config.scrape_interval_)
-		d += (boost::format("5:flagsd20:min_request_intervali%dee") % g_config.scrape_interval_).str();
+		d << "5:flagsd20:min_request_intervali" << g_config.scrape_interval_ << "ee";
 	d += "e";
 	return d;
 }
@@ -1012,9 +1031,10 @@ void srv_term()
 
 void test_announce()
 {
+	assert(!g_torrents.empty());
 	user_t* u = find_ptr(g_users, 1);
 	tracker_input_t i;
-	i.info_hash_ = "IHIHIHIHIHIHIHIHIHIH";
+	i.info_hash_.assign(g_torrents.begin()->first.data(), 20);
 	memcpy(i.peer_id_.data(), str_ref("PIPIPIPIPIPIPIPIPIPI"));
 	i.ipv6_ = {};
 	i.port_ = 54321;

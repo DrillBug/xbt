@@ -78,26 +78,20 @@ void config_t::fill_maps(const config_t* v)
 	}
 	if (v)
 	{
-		listen_ipas_ = v->listen_ipas_;
 		listen_ports_ = v->listen_ports_;
 	}
 }
 
-int config_t::set(const std::string_view name, const std::string_view value)
+int config_t::set(std::string_view name, std::string_view value)
 {
 	if (attribute_t<std::string>* i = find_ptr(attributes_string_, name))
 		*i->value = value;
-	else if (name == "listen_ipa")
-	{
-		if (value != "*")
-			listen_ipas_.insert(inet_addr(std::string(value).c_str()));
-	}
 	else
 		return set(name, int(to_int(value)));
 	return 0;
 }
 
-int config_t::set(const std::string_view name, int value)
+int config_t::set(std::string_view name, int value)
 {
 	if (attribute_t<int>* i = find_ptr(attributes_int_, name))
 		*i->value = value;
@@ -108,7 +102,7 @@ int config_t::set(const std::string_view name, int value)
 	return 0;
 }
 
-int config_t::set(const std::string_view name, bool value)
+int config_t::set(std::string_view name, bool value)
 {
 	if (attribute_t<bool>* i = find_ptr(attributes_bool_, name))
 		*i->value = value;
