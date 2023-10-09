@@ -17,7 +17,7 @@ yum install boost-devel cmake gcc-c++ git make mysql-devel systemd-devel
 Enter the following commands in a terminal. Be patient while g++ is running, it'll take a few minutes.
 
 ```
-git clone https://github.com/DrillBug/xbt
+git clone https://github.com/OlafvdSpek/xbt
 cd xbt/Tracker
 cmake .
 make
